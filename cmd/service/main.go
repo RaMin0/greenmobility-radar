@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	defaultServerPort = "8000"
-	proxyBaseURL      = "https://greenmobility.frontend.fleetbird.eu/api/prod/v1.06"
+	defaultServerPort         = "8000"
+	greenMobilityProxyBaseURL = "https://greenmobility.frontend.fleetbird.eu/api/prod/v1.06"
+	virtaAIProxyBaseURL       = "https://ai.virta-ev.com/api/v1/map/blocks"
 )
 
 var (
@@ -25,8 +26,9 @@ var (
 )
 
 func main() {
-	http.HandleFunc("/api/cars", handlerProxy("/map/cars"))
-	http.HandleFunc("/api/car_types", handlerProxy("/cars/types"))
+	http.HandleFunc("/api/cars", handlerProxy(greenMobilityProxyBaseURL, "/map/cars"))
+	http.HandleFunc("/api/car_types", handlerProxy(greenMobilityProxyBaseURL, "/cars/types"))
+	http.HandleFunc("/api/stations", handlerProxy(virtaAIProxyBaseURL, ""))
 	http.HandleFunc("/", handlerStatic)
 
 	if serverPort == "" {
@@ -36,12 +38,30 @@ func main() {
 	http.ListenAndServe(":"+serverPort, nil)
 }
 
-func handlerProxy(path string) http.HandlerFunc {
+func handlerProxy(baseURL, path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		uri, _ := url.Parse(proxyBaseURL + path)
+		var (
+			err error
+			uri *url.URL
+			res *http.Response
+		)
+		defer func() {
+			var errString string
+			if err != nil {
+				errString = " " + err.Error()
+			}
+			fmt.Println(r.Method, uri, res.StatusCode, errString)
+		}()
+
+		uri, err = url.Parse(baseURL + path)
 		uri.RawQuery = r.URL.RawQuery
-		fmt.Println(uri)
-		res, err := http.Get(uri.String())
+		req, err := http.NewRequest(r.Method, uri.String(), r.Body)
+		req.Header.Add("Content-Type", "application/json")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		res, err = http.DefaultClient.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), res.StatusCode)
 			return
@@ -49,6 +69,7 @@ func handlerProxy(path string) http.HandlerFunc {
 		defer res.Body.Close()
 		w.Header().Add("Access-Control-Allow-Origin", "*")
 		w.Header().Add("Content-Type", "application/json")
+		w.WriteHeader(res.StatusCode)
 		io.Copy(w, res.Body)
 	}
 }

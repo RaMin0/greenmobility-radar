@@ -5,6 +5,7 @@ let rectangleSW;
 let timeout;
 let timeout2;
 let markers = [];
+let markers2 = [];
 let infoWindow;
 let carTypes = [];
 
@@ -14,7 +15,7 @@ function initMap() {
     mapTypeControl: false,
     fullscreenControl: false,
     streetViewControl: false,
-    zoomControl: false,
+    // zoomControl: false,
     styles: styles.silver,
   });
   addMyLocationButton(map);
@@ -28,7 +29,7 @@ function showNewRect() {
   if (timeout) {
     clearTimeout(timeout);
   }
-  timeout = setTimeout(function() { getCars(rectangleSW, rectangleNE, console.log); }, 200);
+  timeout = setTimeout(function() { getData(rectangleSW, rectangleNE, console.log, console.log); }, 200);
 }
 
 function handleLocation(position) {
@@ -37,7 +38,7 @@ function handleLocation(position) {
       clearTimeout(timeout2);
     }
     timeout2 = setTimeout(function () {
-      getCars(map.getBounds().getSouthWest(), map.getBounds().getNorthEast(), drawCars);
+      getData(map.getBounds().getSouthWest(), map.getBounds().getNorthEast(), drawCars, drawStations);
     }, 200);
   });
 
@@ -47,7 +48,7 @@ function handleLocation(position) {
   };
   map.setCenter(pos);
 
-  getCars(map.getBounds().getSouthWest(), map.getBounds().getNorthEast(), drawCars);
+  getData(map.getBounds().getSouthWest(), map.getBounds().getNorthEast(), drawCars, drawStations);
 
   var NORTH = 0;
   var WEST = -90;
@@ -89,14 +90,15 @@ function handleLocationError(browserHasGeolocation) {
   );
 }
 
-function getCars(sw, ne, cb) {
-  var doGetCards = function() {
-    let params = {
-      lat1: sw.lat(),
-      lon1: sw.lng(),
-      lat2: ne.lat(),
-      lon2: ne.lng(),
-    };
+function getData(sw, ne, carsCb, stationsCb) {
+  let params = {
+    lat1: sw.lat(),
+    lon1: sw.lng(),
+    lat2: ne.lat(),
+    lon2: ne.lng(),
+  };
+
+  var doGetCars = function(cb) {
     let query = Object.keys(params)
       .map(k => encodeURIComponent(k) + '=' + encodeURIComponent(params[k]))
       .join('&');
@@ -110,17 +112,65 @@ function getCars(sw, ne, cb) {
     });
   }
 
+  var doGetStations = function(cb) {
+    const GeoTransformLat = source => -source + 90.0;
+    const GeoTransformLng = source => source + 180.0;
+    const MapBlockDivisionsCountLat = zoomLevel => (2.0 ** (zoomLevel - 1));
+    const MapBlockDivisionsCountLng = zoomLevel => (2.0 ** (zoomLevel));
+
+    const MapBlockKeyIndexLatFrom = (lat, zoomLevel) =>
+      Math.floor((GeoTransformLat(lat) / (2.0 * 90.0)) * MapBlockDivisionsCountLat(zoomLevel));
+
+    const MapBlockKeyIndexLngFrom = (lng, zoomLevel) =>
+      Math.floor((GeoTransformLng(lng) / (2.0 * 180.0)) * MapBlockDivisionsCountLng(zoomLevel));
+
+    const zoom = map.zoom,
+          lat1 = MapBlockKeyIndexLatFrom(params.lat1, zoom),
+          lat2 = MapBlockKeyIndexLatFrom(params.lat2, zoom),
+          lng1 = MapBlockKeyIndexLngFrom(params.lon1, zoom),
+          lng2 = MapBlockKeyIndexLngFrom(params.lon2, zoom);
+
+    fetch('/api/stations', {
+      method: 'POST',
+      body: JSON.stringify({
+        KeyRanges: [{
+          IndexLatMin: Math.min(lat1, lat2),
+          IndexLatMax: Math.max(lat1, lat2),
+          IndexLngMin: Math.min(lng1, lng2),
+          IndexLngMax: Math.max(lng1, lng2),
+          IsForDisplay: true,
+          ZoomLevel: 22 - zoom
+        }],
+        Filters: {EvseProviders: ['Virta']}
+      })
+    }).then(function (response) {
+      response.json().then(function(data) {
+        let stations = [];
+        for (let i = 0; i < data['MapBlocks'].length; i++) {
+          let block = data['MapBlocks'][i];
+          stations.push(...block['Stations']);
+        }
+        cb(stations);
+      });
+    })
+  }
+
+  var doGet = function() {
+    doGetCars(carsCb)
+    doGetStations(stationsCb)
+  }
+
   if (!carTypes.length) {
     fetch('/api/car_types').then(function(response) {
       response.json().then(function(data) {
         data.forEach(function(carType) {
           carTypes[parseInt(carType.vehicleTypeId, 10)] = carType;
         });
-        doGetCards();
+        doGet();
       });
     });
   } else {
-    doGetCards();
+    doGet();
   }
 }
 
@@ -134,9 +184,9 @@ function iconColor(fuel) {
   }
 }
 
-function drawCars(data) {
+function drawCars(cars) {
   deleteMarkers();
-  data.forEach(car => {
+  cars.forEach(car => {
     const marker = new google.maps.Marker({
       position: { lat: car.lat, lng: car.lon },
       icon: `https://maps.google.com/mapfiles/ms/icons/${iconColor(car.fuelLevel)}-dot.png`,
@@ -162,16 +212,54 @@ function drawCars(data) {
       );
       infoWindow.open(map, marker);
     });
-
     markers.push(marker);
+  });
+};
+
+function drawStations(stations) {
+  deleteMarkers2();
+  stations.forEach(station => {
+    const marker = new google.maps.Marker({
+      position: { lat: station.latitude, lng: station.longitude },
+      icon: `https://maps.google.com/mapfiles/ms/icons/blue-dot.png`,
+      map,
+    });
+    marker.addListener('click', function () {
+      if (!infoWindow) {
+        infoWindow = new google.maps.InfoWindow({});
+      }
+      infoWindow.setContent(
+        `<div class="gm-style poi-info-window"><div>
+          <div class="title full-width">${station.name} <small style="font-weight: lighter;">(${station.evses.length})</small></div>
+          <div class="address">
+            <div class="address-line full-width">${station.address}</div>
+            <div class="address-line full-width">${station.city}</div>
+          </div>
+          <div class="view-link">
+            <a target="_blank" href="eon://station/${station.id}">
+              View on EON Drive
+            </a>
+          </div>
+        </div></div>`,
+      );
+      infoWindow.open(map, marker);
+    });
+    markers2.push(marker);
   });
 };
 
 function deleteMarkers() {
   for (let i = 0; i < markers.length; i++) {
-    markers[i].setMap(map);
+    markers[i].setMap(null);
   }
   markers = [];
+}
+
+function deleteMarkers2() {
+  for (let i = 0; i < markers2.length; i++) {
+    markers2[i].setMap(null);
+  }
+  markers2 = [];
 }
 
 function getMyLocation(secondChild) {
